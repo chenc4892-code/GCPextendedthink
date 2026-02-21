@@ -1,0 +1,12 @@
+{
+    "display_name": "Claude Extended Thinking",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "",
+    "author": "金瓜瓜",
+    "version": "1.0.0",
+    "homePage": "https://github.com/chenc4892-code/GCPextendedthink.git",
+    "auto_update": false
+}
