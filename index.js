@@ -6,7 +6,7 @@
  * custom_include_body / custom_exclude_body YAML，将 thinking 对象注入请求体。
  */
 
-import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
+import { extension_settings } from '../../../extensions.js';
 import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
 import { chat_completion_sources } from '../../../openai.js';
 
@@ -178,14 +178,50 @@ function bindEvents() {
 }
 
 // ================================================================
+//  Settings panel HTML (inlined to avoid path issues with git installs)
+// ================================================================
+const settingsHtml = `
+<div id="claude-ext-thinking-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Claude Extended Thinking</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="flex-container flexFlowColumn">
+                <small>OpenAI兼容模式下为Claude模型启用Extended Thinking。需要中转API支持thinking参数。</small>
+                <br>
+                <label class="checkbox_label" for="claude_ext_thinking_enabled">
+                    <input type="checkbox" id="claude_ext_thinking_enabled" />
+                    <span>启用 Extended Thinking</span>
+                </label>
+                <br>
+                <label for="claude_ext_thinking_budget_mode">Budget 模式</label>
+                <select id="claude_ext_thinking_budget_mode" class="text_pole">
+                    <option value="auto">自动（跟随 Reasoning Effort）</option>
+                    <option value="manual">手动指定</option>
+                </select>
+                <div id="claude_ext_thinking_manual_group">
+                    <label for="claude_ext_thinking_budget_tokens">Budget Tokens</label>
+                    <input type="number" id="claude_ext_thinking_budget_tokens" class="text_pole"
+                           min="1024" max="1000000" step="1024" value="10000" />
+                    <small>最小值 1024。越大允许的思考越充分。</small>
+                </div>
+                <br>
+                <label for="claude_ext_thinking_model_regex">模型匹配规则（正则）</label>
+                <input type="text" id="claude_ext_thinking_model_regex" class="text_pole"
+                       value="claude-(3-7|3\\.7|opus-4|sonnet-4|haiku-4|opus-4)" />
+                <small>匹配到的模型名才会注入 thinking 参数。</small>
+            </div>
+        </div>
+    </div>
+</div>`;
+
+// ================================================================
 //  Initialization
 // ================================================================
 jQuery(async () => {
-    const html = await renderExtensionTemplateAsync(
-        `third-party/${MODULE_NAME}`,
-        'settings',
-    );
-    $('#extensions_settings2').append(html);
+    $('#extensions_settings2').append(settingsHtml);
 
     loadSettings();
     bindEvents();
