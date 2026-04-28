@@ -1,9 +1,8 @@
 /**
  * Claude Extended Thinking - SillyTavern Extension
  *
- * 在 OpenAI 兼容模式（Custom源）下为 Claude 模型注入 Extended Thinking 参数。
- * 通过 CHAT_COMPLETION_SETTINGS_READY 事件拦截请求，动态修改
- * custom_include_body / custom_exclude_body YAML，将 thinking 对象注入请求体。
+ * Injects Claude thinking parameters for Custom/OpenAI-compatible endpoints.
+ * Also sends narrow plugin flags for the native Anthropic backend path.
  */
 
 import { extension_settings } from '../../../extensions.js';
@@ -13,20 +12,24 @@ import { chat_completion_sources } from '../../../openai.js';
 const MODULE_NAME = 'claude-extended-thinking';
 const LOG_PREFIX = '[ClaudeExtThinking]';
 
-// Default settings
-const defaultSettings = {
-    enabled: false,
-    budgetMode: 'auto',        // 'auto' | 'manual'
-    budgetTokens: 10000,       // manual budget tokens
-    modelRegex: 'claude-(3-7|3\\.7|opus-4|sonnet-4|haiku-4|opus-4)',
+const THINKING_MODE = {
+    AUTO: 'auto',
+    ADAPTIVE: 'adaptive',
+    EXTENDED: 'extended',
 };
 
-/**
- * Calculate budget_tokens from reasoning_effort and max_tokens.
- * Mirrors the logic in src/prompt-converters.js:calculateClaudeBudgetTokens
- */
+const defaultSettings = {
+    enabled: false,
+    thinkingMode: THINKING_MODE.AUTO,
+    budgetMode: 'auto',
+    budgetTokens: 10000,
+    adaptiveEffort: 'high',
+    modelRegex: 'claude-(3-7|3\\.7|.*(?:opus|sonnet|haiku).*(?:4|4[-.]?[67])|.*(?:4|4[-.]?[67]).*(?:opus|sonnet|haiku))',
+};
+
 function calculateBudgetTokens(maxTokens, reasoningEffort) {
     const MIN_BUDGET = 1024;
+    const safeMaxTokens = Math.max(Number(maxTokens) || 4096, MIN_BUDGET + 1);
     let budget;
 
     switch (reasoningEffort) {
@@ -34,94 +37,202 @@ function calculateBudgetTokens(maxTokens, reasoningEffort) {
             budget = MIN_BUDGET;
             break;
         case 'low':
-            budget = Math.floor(maxTokens * 0.1);
+            budget = Math.floor(safeMaxTokens * 0.1);
             break;
         case 'medium':
-            budget = Math.floor(maxTokens * 0.25);
+            budget = Math.floor(safeMaxTokens * 0.25);
             break;
         case 'high':
-            budget = Math.floor(maxTokens * 0.5);
+            budget = Math.floor(safeMaxTokens * 0.5);
             break;
         case 'max':
-            budget = Math.floor(maxTokens * 0.95);
+            budget = Math.floor(safeMaxTokens * 0.95);
             break;
         case 'auto':
         default:
-            // 'auto' → let the API decide; use a reasonable default
-            budget = Math.floor(maxTokens * 0.5);
+            budget = Math.floor(safeMaxTokens * 0.5);
             break;
     }
 
     return Math.max(budget, MIN_BUDGET);
 }
 
-/**
- * Check if a model name matches the Claude extended-thinking pattern.
- */
+function getBudgetTokens(generateData, settings) {
+    if (settings.budgetMode === 'manual') {
+        return Math.max(Number(settings.budgetTokens) || 1024, 1024);
+    }
+
+    return calculateBudgetTokens(generateData.max_tokens, generateData.reasoning_effort || 'high');
+}
+
 function isClaudeThinkingModel(modelName) {
     const settings = extension_settings[MODULE_NAME];
+
     try {
         const regex = new RegExp(settings.modelRegex, 'i');
-        return regex.test(modelName);
+        return regex.test(String(modelName || ''));
     } catch {
         console.warn(LOG_PREFIX, 'Invalid model regex:', settings.modelRegex);
         return false;
     }
 }
 
-/**
- * CHAT_COMPLETION_SETTINGS_READY handler.
- * Modifies generate_data to inject thinking parameters for Custom source.
- */
-function onChatCompletionSettingsReady(generateData) {
-    const settings = extension_settings[MODULE_NAME];
-    if (!settings || !settings.enabled) return;
+function isAdaptiveOnlyModel(modelName) {
+    const model = String(modelName || '').toLowerCase();
+    return /claude-.*opus.*4[-.]?[67]/.test(model) || /claude-.*4[-.]?[67].*opus/.test(model);
+}
 
-    // Only process Custom (OpenAI Compatible) source
-    if (generateData.chat_completion_source !== chat_completion_sources.CUSTOM) {
-        return;
+function resolveThinkingMode(modelName, settings) {
+    if (settings.thinkingMode === THINKING_MODE.ADAPTIVE || settings.thinkingMode === THINKING_MODE.EXTENDED) {
+        return settings.thinkingMode;
     }
 
-    // Check model name
-    if (!isClaudeThinkingModel(generateData.model)) {
-        return;
+    return isAdaptiveOnlyModel(modelName) ? THINKING_MODE.ADAPTIVE : THINKING_MODE.EXTENDED;
+}
+
+function appendYaml(existingYaml, yamlToAppend) {
+    const existing = String(existingYaml || '').trimEnd();
+    return existing ? `${existing}\n${yamlToAppend}` : yamlToAppend;
+}
+
+function removeTopLevelYamlKeys(yamlString, keys) {
+    if (!yamlString) {
+        return '';
     }
 
-    // Calculate budget tokens
-    let budgetTokens;
-    if (settings.budgetMode === 'manual') {
-        budgetTokens = Math.max(Number(settings.budgetTokens) || 1024, 1024);
-    } else {
-        const maxTokens = generateData.max_tokens || 4096;
-        const reasoningEffort = generateData.reasoning_effort || 'high';
-        budgetTokens = calculateBudgetTokens(maxTokens, reasoningEffort);
+    const keyPattern = keys.map(key => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const topLevelKey = new RegExp(`^(${keyPattern})\\s*:`);
+    const lines = String(yamlString).split(/\r?\n/);
+    const kept = [];
+    let skippingBlock = false;
+
+    for (const line of lines) {
+        if (skippingBlock) {
+            if (line.trim() === '' || /^\s/.test(line)) {
+                continue;
+            }
+
+            skippingBlock = false;
+        }
+
+        if (topLevelKey.test(line)) {
+            skippingBlock = true;
+            continue;
+        }
+
+        kept.push(line);
     }
 
-    // Ensure max_tokens > budget_tokens (required by Claude API)
+    return kept.join('\n').trim();
+}
+
+function appendExcludeKeys(existingYaml, keys) {
+    const existing = String(existingYaml || '').trimEnd();
+    const excludeYaml = keys.map(key => `- ${key}`).join('\n');
+    return existing ? `${existing}\n${excludeYaml}` : excludeYaml;
+}
+
+function removeExcludeKeys(existingYaml, keys) {
+    if (!existingYaml) {
+        return '';
+    }
+
+    const keyPattern = keys.map(key => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const listItem = new RegExp(`^\\s*-\\s*(${keyPattern})\\s*$`);
+    const objectKey = new RegExp(`^\\s*(${keyPattern})\\s*:\\s*`);
+
+    return String(existingYaml)
+        .split(/\r?\n/)
+        .filter(line => !listItem.test(line) && !objectKey.test(line))
+        .join('\n')
+        .trim();
+}
+
+function applyCustomAdaptiveThinking(generateData, settings) {
+    const effort = settings.adaptiveEffort || 'high';
+    const adaptiveYaml = [
+        'thinking:',
+        '  type: adaptive',
+        '  display: summarized',
+        'output_config:',
+        `  effort: ${effort}`,
+        'temperature: 1',
+    ].join('\n');
+
+    generateData.temperature = 1;
+    generateData.custom_include_body = removeTopLevelYamlKeys(generateData.custom_include_body, ['thinking', 'output_config', 'temperature', 'top_p', 'top_k']);
+    generateData.custom_include_body = appendYaml(generateData.custom_include_body, adaptiveYaml);
+    generateData.custom_exclude_body = removeExcludeKeys(generateData.custom_exclude_body, ['temperature']);
+    generateData.custom_exclude_body = appendExcludeKeys(generateData.custom_exclude_body, ['top_p', 'top_k']);
+}
+
+function applyCustomExtendedThinking(generateData, budgetTokens) {
     if (generateData.max_tokens && generateData.max_tokens <= budgetTokens) {
         generateData.max_tokens = budgetTokens + 1024;
         console.info(LOG_PREFIX, `Auto-increased max_tokens to ${generateData.max_tokens} (must be > budget_tokens ${budgetTokens})`);
     }
 
-    // Build the thinking YAML to inject
-    const thinkingYaml = `\nthinking:\n  type: enabled\n  budget_tokens: ${budgetTokens}`;
+    const extendedYaml = [
+        'thinking:',
+        '  type: enabled',
+        `  budget_tokens: ${budgetTokens}`,
+    ].join('\n');
 
-    // Append to custom_include_body
-    const existingInclude = generateData.custom_include_body || '';
-    generateData.custom_include_body = existingInclude + thinkingYaml;
-
-    // Build exclude list for temperature/top_p/top_k (Claude API requires removal when thinking is enabled)
-    const excludeKeys = ['temperature', 'top_p', 'top_k'];
-    const existingExclude = generateData.custom_exclude_body || '';
-    const excludeYaml = excludeKeys.map(k => `\n- ${k}`).join('');
-    generateData.custom_exclude_body = existingExclude + excludeYaml;
-
-    console.info(LOG_PREFIX, `Injected extended thinking: budget_tokens=${budgetTokens}, model=${generateData.model}`);
+    generateData.custom_include_body = removeTopLevelYamlKeys(generateData.custom_include_body, ['thinking']);
+    generateData.custom_include_body = appendYaml(generateData.custom_include_body, extendedYaml);
+    generateData.custom_exclude_body = appendExcludeKeys(generateData.custom_exclude_body, ['temperature', 'top_p', 'top_k']);
 }
 
-/**
- * Load settings from extension_settings and apply to UI.
- */
+function applyNativeAdaptiveThinking(generateData, settings) {
+    generateData.claude_ext_thinking_mode = THINKING_MODE.ADAPTIVE;
+    generateData.claude_ext_adaptive_effort = settings.adaptiveEffort || 'high';
+    generateData.temperature = 1;
+    delete generateData.top_p;
+    delete generateData.top_k;
+}
+
+function applyNativeExtendedThinking(generateData, budgetTokens) {
+    if (generateData.max_tokens && generateData.max_tokens <= budgetTokens) {
+        generateData.max_tokens = budgetTokens + 1024;
+        console.info(LOG_PREFIX, `Auto-increased max_tokens to ${generateData.max_tokens} (must be > budget_tokens ${budgetTokens})`);
+    }
+
+    generateData.claude_ext_thinking_mode = THINKING_MODE.EXTENDED;
+    generateData.claude_ext_budget_tokens = budgetTokens;
+    delete generateData.temperature;
+    delete generateData.top_p;
+    delete generateData.top_k;
+}
+
+function onChatCompletionSettingsReady(generateData) {
+    const settings = extension_settings[MODULE_NAME];
+    if (!settings || !settings.enabled) return;
+
+    if (![chat_completion_sources.CUSTOM, chat_completion_sources.CLAUDE].includes(generateData.chat_completion_source)) {
+        return;
+    }
+
+    if (!isClaudeThinkingModel(generateData.model)) {
+        return;
+    }
+
+    const thinkingMode = resolveThinkingMode(generateData.model, settings);
+
+    if (generateData.chat_completion_source === chat_completion_sources.CUSTOM) {
+        if (thinkingMode === THINKING_MODE.ADAPTIVE) {
+            applyCustomAdaptiveThinking(generateData, settings);
+        } else {
+            applyCustomExtendedThinking(generateData, getBudgetTokens(generateData, settings));
+        }
+    } else if (thinkingMode === THINKING_MODE.ADAPTIVE) {
+        applyNativeAdaptiveThinking(generateData, settings);
+    } else {
+        applyNativeExtendedThinking(generateData, getBudgetTokens(generateData, settings));
+    }
+
+    console.info(LOG_PREFIX, `Injected ${thinkingMode} thinking for model=${generateData.model}`);
+}
+
 function loadSettings() {
     extension_settings[MODULE_NAME] = Object.assign(
         {},
@@ -132,42 +243,50 @@ function loadSettings() {
     const settings = extension_settings[MODULE_NAME];
 
     $('#claude_ext_thinking_enabled').prop('checked', settings.enabled);
+    $('#claude_ext_thinking_mode').val(settings.thinkingMode);
     $('#claude_ext_thinking_budget_mode').val(settings.budgetMode);
     $('#claude_ext_thinking_budget_tokens').val(settings.budgetTokens);
+    $('#claude_ext_thinking_adaptive_effort').val(settings.adaptiveEffort);
     $('#claude_ext_thinking_model_regex').val(settings.modelRegex);
 
-    toggleManualGroup(settings.budgetMode);
+    updateModeVisibility(settings.thinkingMode);
 }
 
-/**
- * Show/hide manual budget input based on mode.
- */
-function toggleManualGroup(mode) {
-    if (mode === 'manual') {
-        $('#claude_ext_thinking_manual_group').show();
-    } else {
-        $('#claude_ext_thinking_manual_group').hide();
-    }
+function updateModeVisibility(mode) {
+    const showExtended = mode !== THINKING_MODE.ADAPTIVE;
+    const showAdaptive = mode !== THINKING_MODE.EXTENDED;
+
+    $('#claude_ext_thinking_extended_group').toggle(showExtended);
+    $('#claude_ext_thinking_adaptive_group').toggle(showAdaptive);
+    $('#claude_ext_thinking_manual_group').toggle(showExtended && extension_settings[MODULE_NAME].budgetMode === 'manual');
 }
 
-/**
- * Bind settings UI events.
- */
 function bindEvents() {
     $('#claude_ext_thinking_enabled').on('change', function () {
         extension_settings[MODULE_NAME].enabled = $(this).prop('checked');
         saveSettingsDebounced();
     });
 
-    $('#claude_ext_thinking_budget_mode').on('change', function () {
+    $('#claude_ext_thinking_mode').on('change', function () {
         const mode = String($(this).val());
-        extension_settings[MODULE_NAME].budgetMode = mode;
-        toggleManualGroup(mode);
+        extension_settings[MODULE_NAME].thinkingMode = mode;
+        updateModeVisibility(mode);
+        saveSettingsDebounced();
+    });
+
+    $('#claude_ext_thinking_budget_mode').on('change', function () {
+        extension_settings[MODULE_NAME].budgetMode = String($(this).val());
+        updateModeVisibility(extension_settings[MODULE_NAME].thinkingMode);
         saveSettingsDebounced();
     });
 
     $('#claude_ext_thinking_budget_tokens').on('input', function () {
         extension_settings[MODULE_NAME].budgetTokens = Number($(this).val()) || 10000;
+        saveSettingsDebounced();
+    });
+
+    $('#claude_ext_thinking_adaptive_effort').on('change', function () {
+        extension_settings[MODULE_NAME].adaptiveEffort = String($(this).val());
         saveSettingsDebounced();
     });
 
@@ -177,9 +296,6 @@ function bindEvents() {
     });
 }
 
-// ================================================================
-//  Settings panel HTML (inlined to avoid path issues with git installs)
-// ================================================================
 const settingsHtml = `
 <div id="claude-ext-thinking-settings">
     <div class="inline-drawer">
@@ -189,44 +305,61 @@ const settingsHtml = `
         </div>
         <div class="inline-drawer-content">
             <div class="flex-container flexFlowColumn">
-                <small>OpenAI兼容模式下为Claude模型启用Extended Thinking。需要中转API支持thinking参数。</small>
+                <small>为 Claude 注入思考参数，支持 Custom/OpenAI 兼容端点和原生 Anthropic Claude。</small>
+                <small>本插件由金瓜瓜API@gua.guagua.uk开发。</small>
                 <br>
                 <label class="checkbox_label" for="claude_ext_thinking_enabled">
                     <input type="checkbox" id="claude_ext_thinking_enabled" />
-                    <span>启用 Extended Thinking</span>
+                    <span>启用 Claude 思考</span>
                 </label>
                 <br>
-                <label for="claude_ext_thinking_budget_mode">Budget 模式</label>
-                <select id="claude_ext_thinking_budget_mode" class="text_pole">
-                    <option value="auto">自动（跟随 Reasoning Effort）</option>
-                    <option value="manual">手动指定</option>
+                <label for="claude_ext_thinking_mode">思考模式</label>
+                <select id="claude_ext_thinking_mode" class="text_pole">
+                    <option value="auto">自动：Opus 4.6/4.7 使用自适应，旧模型使用 Extended</option>
+                    <option value="adaptive">自适应：thinking.type adaptive</option>
+                    <option value="extended">Extended：thinking.type enabled + budget_tokens</option>
                 </select>
-                <div id="claude_ext_thinking_manual_group">
-                    <label for="claude_ext_thinking_budget_tokens">Budget Tokens</label>
-                    <input type="number" id="claude_ext_thinking_budget_tokens" class="text_pole"
-                           min="1024" max="1000000" step="1024" value="10000" />
-                    <small>最小值 1024。越大允许的思考越充分。</small>
+                <small>Claude Opus 4.7 请使用自适应。Opus 4.6 可以在这里手动选择自适应或 Extended。</small>
+                <br>
+                <div id="claude_ext_thinking_adaptive_group">
+                    <label for="claude_ext_thinking_adaptive_effort">自适应思考强度</label>
+                    <select id="claude_ext_thinking_adaptive_effort" class="text_pole">
+                        <option value="high">高</option>
+                        <option value="xhigh">超高</option>
+                        <option value="max">最大</option>
+                        <option value="medium">中</option>
+                        <option value="low">低</option>
+                    </select>
+                    <small>自适应模式会注入 thinking.display summarized、output_config.effort，并将温度设为 1。</small>
+                </div>
+                <div id="claude_ext_thinking_extended_group">
+                    <label for="claude_ext_thinking_budget_mode">Extended 预算模式</label>
+                    <select id="claude_ext_thinking_budget_mode" class="text_pole">
+                        <option value="auto">自动：跟随 Reasoning Effort</option>
+                        <option value="manual">手动指定 budget_tokens</option>
+                    </select>
+                    <div id="claude_ext_thinking_manual_group">
+                        <label for="claude_ext_thinking_budget_tokens">Budget Tokens</label>
+                        <input type="number" id="claude_ext_thinking_budget_tokens" class="text_pole" min="1024" max="1000000" step="1024" value="10000" />
+                        <small>最小值为 1024，仅 Extended 模式使用。</small>
+                    </div>
                 </div>
                 <br>
                 <label for="claude_ext_thinking_model_regex">模型匹配规则（正则）</label>
                 <input type="text" id="claude_ext_thinking_model_regex" class="text_pole"
-                       value="claude-(3-7|3\\.7|opus-4|sonnet-4|haiku-4|opus-4)" />
-                <small>匹配到的模型名才会注入 thinking 参数。</small>
+                       value="${defaultSettings.modelRegex.replace(/"/g, '&quot;')}" />
+                <small>只有匹配到的模型名才会注入思考参数。</small>
             </div>
         </div>
     </div>
 </div>`;
 
-// ================================================================
-//  Initialization
-// ================================================================
 jQuery(async () => {
     $('#extensions_settings2').append(settingsHtml);
 
     loadSettings();
     bindEvents();
 
-    // Register the request interceptor
     eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, onChatCompletionSettingsReady);
 
     console.info(LOG_PREFIX, 'Extension loaded.');

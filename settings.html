@@ -1,0 +1,57 @@
+<div id="claude-ext-thinking-settings">
+  <div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+      <b>Claude Extended Thinking</b>
+      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+      <div class="flex-container flexFlowColumn">
+        <small>为 Claude 注入思考参数，支持 Custom/OpenAI 兼容端点和原生 Anthropic Claude。</small>
+        <small>本插件由金瓜瓜API@gua.guagua.uk开发。</small>
+        <br>
+        <label class="checkbox_label" for="claude_ext_thinking_enabled">
+          <input type="checkbox" id="claude_ext_thinking_enabled" />
+          <span>启用 Claude 思考</span>
+        </label>
+        <br>
+        <label for="claude_ext_thinking_mode">思考模式</label>
+        <select id="claude_ext_thinking_mode" class="text_pole">
+          <option value="auto">自动：Opus 4.6/4.7 使用自适应，旧模型使用 Extended</option>
+          <option value="adaptive">自适应：thinking.type adaptive</option>
+          <option value="extended">Extended：thinking.type enabled + budget_tokens</option>
+        </select>
+        <small>Claude Opus 4.7 请使用自适应。Opus 4.6 可以在这里手动选择自适应或 Extended。</small>
+        <br>
+        <div id="claude_ext_thinking_adaptive_group">
+          <label for="claude_ext_thinking_adaptive_effort">自适应思考强度</label>
+          <select id="claude_ext_thinking_adaptive_effort" class="text_pole">
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+          </select>
+          <small>自适应模式会注入 thinking.display summarized、output_config.effort，并将温度设为 1。</small>
+        </div>
+        <div id="claude_ext_thinking_extended_group">
+          <label for="claude_ext_thinking_budget_mode">Extended 预算模式</label>
+          <select id="claude_ext_thinking_budget_mode" class="text_pole">
+            <option value="auto">自动：跟随 Reasoning Effort</option>
+            <option value="manual">手动指定 budget_tokens</option>
+          </select>
+          <div id="claude_ext_thinking_manual_group">
+            <label for="claude_ext_thinking_budget_tokens">Budget Tokens</label>
+            <input type="number" id="claude_ext_thinking_budget_tokens" class="text_pole" min="1024" max="1000000"
+              step="1024" value="10000" />
+            <small>最小值为 1024，仅 Extended 模式使用。</small>
+          </div>
+        </div>
+        <br>
+        <label for="claude_ext_thinking_model_regex">模型匹配规则（正则）</label>
+        <input type="text" id="claude_ext_thinking_model_regex" class="text_pole"
+          value="claude-(3-7|3\.7|.*(?:opus|sonnet|haiku).*(?:4|4[-.]?[67])|.*(?:4|4[-.]?[67]).*(?:opus|sonnet|haiku))" />
+        <small>只有匹配到的模型名才会注入思考参数。</small>
+      </div>
+    </div>
+  </div>
+</div>
