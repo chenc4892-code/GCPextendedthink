@@ -24,7 +24,7 @@ const defaultSettings = {
     budgetMode: 'auto',
     budgetTokens: 10000,
     adaptiveEffort: 'high',
-    modelRegex: 'claude-(3-7|3\\.7|.*(?:opus|sonnet|haiku).*(?:4|4[-.]?[67])|.*(?:4|4[-.]?[67]).*(?:opus|sonnet|haiku))',
+    modelRegex: '(?:claude-(?:3-7|3\\.7|.*(?:opus|sonnet|haiku|fable).*(?:4|4[-.]?[67]|5)|.*(?:4|4[-.]?[67]|5).*(?:opus|sonnet|haiku|fable))|fable[-.]?5|fable.*5|.*fable.*5)',
 };
 
 function calculateBudgetTokens(maxTokens, reasoningEffort) {
@@ -79,7 +79,9 @@ function isClaudeThinkingModel(modelName) {
 
 function isAdaptiveOnlyModel(modelName) {
     const model = String(modelName || '').toLowerCase();
-    return /claude-.*opus.*4[-.]?[67]/.test(model) || /claude-.*4[-.]?[67].*opus/.test(model);
+    return /claude-.*(?:opus|sonnet|fable).*?(?:4[-.]?[67]|5)/.test(model)
+    || /claude-.*(?:4[-.]?[67]|5).*?(?:opus|sonnet|fable)/.test(model)
+    || /(?:^|[-_.])fable[-_.]?5(?:$|[-_.])/.test(model);
 }
 
 function resolveThinkingMode(modelName, settings) {
