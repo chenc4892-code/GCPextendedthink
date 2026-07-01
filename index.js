@@ -12,6 +12,8 @@ import { chat_completion_sources } from '../../../openai.js';
 const MODULE_NAME = 'claude-extended-thinking';
 const LOG_PREFIX = '[ClaudeExtThinking]';
 
+const DEFAULT_MODEL_REGEX = '(?:claude-(?:3[-.]?7|.*(?:opus|sonnet|haiku|fable).*(?:4|4[-.]?[5-9]|5)|.*(?:4|4[-.]?[5-9]|5).*(?:opus|sonnet|haiku|fable))|(?:^|[/_.-])fable[-_.]?5(?:$|[/_.-]))';
+
 const THINKING_MODE = {
     AUTO: 'auto',
     ADAPTIVE: 'adaptive',
@@ -24,7 +26,7 @@ const defaultSettings = {
     budgetMode: 'auto',
     budgetTokens: 10000,
     adaptiveEffort: 'high',
-    modelRegex: '(?:claude-(?:3-7|3\\.7|.*(?:opus|sonnet|haiku|fable).*(?:4|4[-.]?[67]|5)|.*(?:4|4[-.]?[67]|5).*(?:opus|sonnet|haiku|fable))|fable[-.]?5|fable.*5|.*fable.*5)',
+    modelRegex: DEFAULT_MODEL_REGEX,
 };
 
 function calculateBudgetTokens(maxTokens, reasoningEffort) {
@@ -65,6 +67,27 @@ function getBudgetTokens(generateData, settings) {
     return calculateBudgetTokens(generateData.max_tokens, generateData.reasoning_effort || 'high');
 }
 
+function regexMatchesSample(regexString, sample) {
+    try {
+        return new RegExp(regexString, 'i').test(sample);
+    } catch {
+        return false;
+    }
+}
+
+function migrateModelRegex(settings) {
+    const regex = String(settings.modelRegex || '');
+
+    // SillyTavern persists extension_settings. If the user already saved the old regex,
+    // changing defaultSettings alone will not update the UI value or injection behavior.
+    if (!regex || !regexMatchesSample(regex, 'claude-sonnet-5') || !regexMatchesSample(regex, 'fable-5')) {
+        settings.modelRegex = DEFAULT_MODEL_REGEX;
+        return true;
+    }
+
+    return false;
+}
+
 function isClaudeThinkingModel(modelName) {
     const settings = extension_settings[MODULE_NAME];
 
@@ -79,9 +102,12 @@ function isClaudeThinkingModel(modelName) {
 
 function isAdaptiveOnlyModel(modelName) {
     const model = String(modelName || '').toLowerCase();
-    return /claude-.*(?:opus|sonnet|fable).*?(?:4[-.]?[67]|5)/.test(model)
-    || /claude-.*(?:4[-.]?[67]|5).*?(?:opus|sonnet|fable)/.test(model)
-    || /(?:^|[-_.])fable[-_.]?5(?:$|[-_.])/.test(model);
+
+    // Opus 4.6/4.7/4.8+ and Claude 5 family should use adaptive thinking.
+    // Sonnet 5 / Fable 5 do not reliably show thinking through the old Extended budget path.
+    return /claude-.*(?:opus|sonnet|fable).*?(?:4[-.]?[6-9]|5)/.test(model)
+        || /claude-.*(?:4[-.]?[6-9]|5).*?(?:opus|sonnet|fable)/.test(model)
+        || /(?:^|[/_.-])fable[-_.]?5(?:$|[/_.-])/.test(model);
 }
 
 function resolveThinkingMode(modelName, settings) {
@@ -164,7 +190,7 @@ function applyCustomAdaptiveThinking(generateData, settings) {
     generateData.temperature = 1;
     generateData.custom_include_body = removeTopLevelYamlKeys(generateData.custom_include_body, ['thinking', 'output_config', 'temperature', 'top_p', 'top_k']);
     generateData.custom_include_body = appendYaml(generateData.custom_include_body, adaptiveYaml);
-    generateData.custom_exclude_body = removeExcludeKeys(generateData.custom_exclude_body, ['temperature']);
+    generateData.custom_exclude_body = removeExcludeKeys(generateData.custom_exclude_body, ['temperature', 'top_p', 'top_k']);
     generateData.custom_exclude_body = appendExcludeKeys(generateData.custom_exclude_body, ['top_p', 'top_k']);
 }
 
@@ -182,6 +208,7 @@ function applyCustomExtendedThinking(generateData, budgetTokens) {
 
     generateData.custom_include_body = removeTopLevelYamlKeys(generateData.custom_include_body, ['thinking']);
     generateData.custom_include_body = appendYaml(generateData.custom_include_body, extendedYaml);
+    generateData.custom_exclude_body = removeExcludeKeys(generateData.custom_exclude_body, ['temperature', 'top_p', 'top_k']);
     generateData.custom_exclude_body = appendExcludeKeys(generateData.custom_exclude_body, ['temperature', 'top_p', 'top_k']);
 }
 
@@ -215,6 +242,7 @@ function onChatCompletionSettingsReady(generateData) {
     }
 
     if (!isClaudeThinkingModel(generateData.model)) {
+        console.info(LOG_PREFIX, `Skipped: model does not match regex. model=${generateData.model}, regex=${settings.modelRegex}`);
         return;
     }
 
@@ -243,6 +271,11 @@ function loadSettings() {
     );
 
     const settings = extension_settings[MODULE_NAME];
+
+    if (migrateModelRegex(settings)) {
+        saveSettingsDebounced();
+        console.info(LOG_PREFIX, 'Migrated model regex for Sonnet 5 / Fable 5 support.');
+    }
 
     $('#claude_ext_thinking_enabled').prop('checked', settings.enabled);
     $('#claude_ext_thinking_mode').val(settings.thinkingMode);
@@ -317,11 +350,11 @@ const settingsHtml = `
                 <br>
                 <label for="claude_ext_thinking_mode">思考模式</label>
                 <select id="claude_ext_thinking_mode" class="text_pole">
-                    <option value="auto">自动：Opus 4.6/4.7 使用自适应，旧模型使用 Extended</option>
+                    <option value="auto">自动：Sonnet 5 / Fable 5 / Opus 4.6+ 使用自适应，旧模型使用 Extended</option>
                     <option value="adaptive">自适应：thinking.type adaptive</option>
                     <option value="extended">Extended：thinking.type enabled + budget_tokens</option>
                 </select>
-                <small>Claude Opus 4.7 请使用自适应。Opus 4.6 可以在这里手动选择自适应或 Extended。</small>
+                <small>Sonnet 5 / Fable 5 / Opus 4.7+ 请使用自适应；自动模式会优先走 adaptive。</small>
                 <br>
                 <div id="claude_ext_thinking_adaptive_group">
                     <label for="claude_ext_thinking_adaptive_effort">自适应思考强度</label>
