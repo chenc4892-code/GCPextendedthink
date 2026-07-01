@@ -213,8 +213,32 @@ function applyCustomExtendedThinking(generateData, budgetTokens) {
 }
 
 function applyNativeAdaptiveThinking(generateData, settings) {
+    const effort = settings.adaptiveEffort || 'high';
+    const adaptiveYaml = [
+        'thinking:',
+        '  type: adaptive',
+        '  display: summarized',
+        'output_config:',
+        `  effort: ${effort}`,
+        'temperature: 1',
+    ].join('\n');
+
+    // Flags for patched/native Anthropic path.
     generateData.claude_ext_thinking_mode = THINKING_MODE.ADAPTIVE;
-    generateData.claude_ext_adaptive_effort = settings.adaptiveEffort || 'high';
+    generateData.claude_ext_adaptive_effort = effort;
+    generateData.claude_ext_thinking_display = 'summarized';
+
+    // Direct request-body fallback. Some SillyTavern/custom-proxy paths ignore the
+    // narrow claude_ext_* flags but still honor custom_include_body.
+    generateData.custom_include_body = removeTopLevelYamlKeys(generateData.custom_include_body, ['thinking', 'output_config', 'temperature', 'top_p', 'top_k']);
+    generateData.custom_include_body = appendYaml(generateData.custom_include_body, adaptiveYaml);
+    generateData.custom_exclude_body = removeExcludeKeys(generateData.custom_exclude_body, ['temperature', 'top_p', 'top_k']);
+    generateData.custom_exclude_body = appendExcludeKeys(generateData.custom_exclude_body, ['top_p', 'top_k']);
+
+    // Direct object fallback for request builders that preserve top-level generateData.
+    generateData.thinking = { type: THINKING_MODE.ADAPTIVE, display: 'summarized' };
+    generateData.output_config = Object.assign({}, generateData.output_config || {}, { effort });
+
     generateData.temperature = 1;
     delete generateData.top_p;
     delete generateData.top_k;
@@ -365,7 +389,7 @@ const settingsHtml = `
                         <option value="medium">中</option>
                         <option value="low">低</option>
                     </select>
-                    <small>自适应模式会注入 thinking.display summarized、output_config.effort，并将温度设为 1。</small>
+                    <small>自适应模式会显式注入 thinking.display summarized、output_config.effort，并将温度设为 1。Sonnet 5/Fable 5 默认会 omitted，不显式写 display 就可能看不到思考摘要。</small>
                 </div>
                 <div id="claude_ext_thinking_extended_group">
                     <label for="claude_ext_thinking_budget_mode">Extended 预算模式</label>
